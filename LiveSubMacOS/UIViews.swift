@@ -1,5 +1,7 @@
 import SwiftUI
 import Combine
+import CoreGraphics // Cần thiết để gọi hàm check quyền màn hình
+import AppKit // Để gọi NSWorkspace mở Settings
 
 @MainActor
 final class UIState: ObservableObject {
@@ -8,6 +10,8 @@ final class UIState: ObservableObject {
     @Published var pendingText = ""
     @Published var isModelReady = false
     @Published var statusMessage = "Loading speech model..."
+    
+    @Published var hasScreenRecordPermission = false
 
     private let audioManager = AudioStreamManager()
 
@@ -19,6 +23,8 @@ final class UIState: ObservableObject {
     }
 
     init() {
+        checkPermission() // Check quyền ngay khi khởi tạo
+        
         Task {
             await audioManager.setCallbacks(
                 onModelReady: { [weak self] in
@@ -37,8 +43,50 @@ final class UIState: ObservableObject {
                 }
             )
         }
+        
+        // Lắng nghe khi user từ System Settings quay lại app để check quyền lại
+        Task { @MainActor [weak self] in
+            let notifications = NotificationCenter.default.notifications(named: NSApplication.didBecomeActiveNotification)
+            for await _ in notifications {
+                guard let self else { break }
+                self.checkPermission()
+                self.updateStatusBasedOnPermission()
+            }
+        }
+    }
+    
+    
+    // MARK: - Permission Logic
+    func checkPermission() {
+        // Hàm này không hiện popup, chỉ trả về true/false xem đã có quyền chưa
+        hasScreenRecordPermission = CGPreflightScreenCaptureAccess()
+    }
+    
+    func requestPermission() {
+        // Hàm này sẽ trigger popup của macOS nếu chưa xin bao giờ
+        let granted = CGRequestScreenCaptureAccess()
+        hasScreenRecordPermission = granted
+        
+        if !granted {
+            // Mở thẳng trang Cài đặt -> Quyền riêng tư -> Ghi màn hình
+            let urlString = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+            if let url = URL(string: urlString) {
+                NSWorkspace.shared.open(url)
+            }
+            statusMessage = "Please allow Screen Recording in Settings."
+        }
+    }
+    
+    private func updateStatusBasedOnPermission() {
+        guard isModelReady else { return }
+        if hasScreenRecordPermission {
+            statusMessage = "Tap the panel to start transcription."
+        } else {
+            statusMessage = "Missing Screen Recording permission."
+        }
     }
 
+    // MARK: - Actions
     private func updateSubtitle(_ snapshot: SubtitleSnapshot) {
         // TỐI ƯU HUỶ DIỆT "NHẢY CHỮ": 
         // Subtitle đã được bọc thành khối 2 dòng hoàn hảo bởi AudioStreamManager.
@@ -175,10 +223,19 @@ struct DynamicIslandView: View {
             
             // Khối hiển thị chữ (Fix minHeight để nó không bị lép khi không có chữ)
             if uiState.displayText.isEmpty {
-                Text(uiState.isRecording ? "Listening..." : "Tap to start")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.6))
-                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .center) // ÉP CĂN GIỮA
+                
+                if !uiState.hasScreenRecordPermission {
+                    // Cảnh báo nổi bật nếu thiếu quyền
+                    Text("Grant Permission to Start")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .center)
+                } else {
+                    Text(uiState.isRecording ? "Listening..." : "Tap to start")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.6))
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .center)
+                }
             } else {
                 Text(uiState.displayText)
                     .font(.system(size: 16, weight: .medium))
