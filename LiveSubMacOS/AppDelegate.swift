@@ -4,15 +4,41 @@ import SwiftUI
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var islandPanel: DynamicIslandPanel?
+    private var statusItem: NSStatusItem?
     private let uiState = UIState()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        setupStatusBar()
         setupIsland()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
+    
+    private func setupStatusBar() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = statusItem?.button {
+            button.image = NSImage(systemSymbolName: "captions.bubble.fill", accessibilityDescription: "MacSub")
+        }
+        
+        let menu = NSMenu()
+        menu.addItem(NSMenuItem(title: "Show/Hide Island", action: #selector(toggleIsland), keyEquivalent: "i"))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: "Quit MacSub", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        
+        statusItem?.menu = menu
+    }
+    
+    @objc private func toggleIsland() {
+        guard let panel = islandPanel else { return }
+        if panel.isVisible {
+            panel.orderOut(nil)
+        } else {
+            panel.orderFrontRegardless()
+        }
+    }
+    
 
     private func setupIsland() {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
@@ -39,7 +65,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.level = .statusBar
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        
+        panel.isMovable = true
+        panel.isMovableByWindowBackground = true
+        
+//        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.contentView = NSHostingView(rootView: DynamicIslandView(uiState: uiState))
         panel.orderFrontRegardless()
 
