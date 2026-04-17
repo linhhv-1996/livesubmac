@@ -86,214 +86,200 @@ final class UIState: ObservableObject {
 struct DynamicIslandView: View {
     @ObservedObject var uiState: UIState
     
-    // Quản lý trạng thái giao diện
     @State private var isSettingsMode = false
     @State private var isSettingsHovered = false
     @State private var isQuitHovered = false
+    @State private var isActivateHovered = false
     
-    // Đọc trực tiếp ngôn ngữ từ AppStorage để cập nhật realtime
     @AppStorage("selectedLanguage") private var selectedLanguage = "en-US"
+    @AppStorage("selectedModel") private var selectedModel = "turbo"
     @AppStorage("licenseKey") private var licenseKey = ""
 
+    // Kích thước cố định để gióng hàng cột Setting bên dưới
+    private let labelWidth: CGFloat = 90
+    private let controlWidth: CGFloat = 240
+
     var body: some View {
+        // VStack tổng: Tự động tính toán chiều cao dựa trên content bên trong
         VStack(spacing: 0) {
-            ZStack {
-                if isSettingsMode {
-                    settingsContent
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .trailing).combined(with: .opacity),
-                            removal: .move(edge: .leading).combined(with: .opacity)
-                        ))
-                } else {
-                    mainSubtitleContent
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .leading).combined(with: .opacity),
-                            removal: .move(edge: .trailing).combined(with: .opacity)
-                        ))
+            
+            // 1. PHẦN SUBTITLE CHÍNH (Luôn hiển thị)
+            mainSubtitleContent
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if !isSettingsMode { uiState.toggleRecording() }
                 }
+            
+            // 2. PHẦN SETTING (Nở ra khi click vào nút Gear)
+            if isSettingsMode {
+                Divider()
+                    .background(.white.opacity(0.15))
+                    .padding(.horizontal, 20)
+                
+                settingsContent
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
+                    // Hiệu ứng trượt từ trên xuống khi bung ra
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 14)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .background(
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.08, green: 0.08, blue: 0.1),
-                        Color.black.opacity(0.94)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .stroke(.white.opacity(0.08), lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         }
+        // Background và Viền áp dụng cho TOÀN BỘ VStack tổng
+        .background(
+            LinearGradient(
+                colors: [Color(red: 0.1, green: 0.1, blue: 0.12), Color.black],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(.white.opacity(0.1), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .padding(.top, 6)
+        // Animation sẽ làm panel co giãn mượt mà khi isSettingsMode thay đổi
+        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isSettingsMode)
+        // Đặt max size thay vì fix cứng frame, đẩy view lên trên cùng của NSPanel
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        // Khi tap vào vùng trống, nếu đang recording thì toggle, nếu đang settings thì không làm gì hoặc đóng settings
-        .onTapGesture {
-            if !isSettingsMode {
-                uiState.toggleRecording()
-            }
-        }
     }
 
-    // --- KHỐI GIAO DIỆN CHÍNH (Subtitle) ---
+    // --- MAIN SUBTITLE VIEW ---
     private var mainSubtitleContent: some View {
         VStack(spacing: 12) {
-            HStack(spacing: 10) {
-                // Đèn báo hiệu Live
+            HStack(spacing: 12) {
                 statusIndicator
                 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(uiState.isRecording ? "LIVE SUBTITLE" : "READY")
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .font(.system(size: 10, weight: .black, design: .rounded))
                         .foregroundStyle(.white.opacity(0.9))
                     Text(uiState.statusMessage)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.55))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.6))
                         .lineLimit(1)
                 }
-
-                Spacer()
-
-                // Nút Gear: Chuyển sang Settings mode
-                Button {
-                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                        isSettingsMode = true
-                    }
-                } label: {
-                    Image(systemName: "gearshape.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(isSettingsHovered ? .white : .white.opacity(0.75))
-                        .frame(width: 28, height: 28)
-                        .background(isSettingsHovered ? .white.opacity(0.2) : .white.opacity(0.08), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .onHover { isSettingsHovered = $0 }
                 
-                // Nút X: Thoát app nhanh
-                exitButton
+                Spacer()
+                
+                // Nút Gear giờ sẽ đóng/mở panel thay vì chuyển cảnh
+                CircleButton(icon: isSettingsMode ? "chevron.up" : "gearshape.fill", isHovered: $isSettingsHovered) {
+                    isSettingsMode.toggle()
+                }
+                
+                CircleButton(icon: "xmark", isHovered: $isQuitHovered, activeColor: .red.opacity(0.7)) {
+                    NSApplication.shared.terminate(nil)
+                }
             }
-
-            subtitleBlock
+            
+            // Khối hiển thị chữ (Fix minHeight để nó không bị lép khi không có chữ)
+            if uiState.displayText.isEmpty {
+                Text(uiState.isRecording ? "Listening..." : "Tap to start")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .center) // ÉP CĂN GIỮA
+            } else {
+                Text(uiState.displayText)
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .topLeading) // ÉP GÓC TRÊN BÊN TRÁI
+            }
         }
     }
 
-    // --- KHỐI GIAO DIỆN CÀI ĐẶT (Settings) ---
+    // --- EXPANDED SETTINGS VIEW ---
     private var settingsContent: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label("Settings", systemImage: "slider.horizontal.3")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(.white)
-                
-                Spacer()
-                
-                // Nút Done: Quay lại màn hình chính
-                Button("Done") {
-                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                        isSettingsMode = false
+        VStack(spacing: 14) {
+            // Hàng 1: Language
+            settingsRow(label: "Language") {
+                Picker("", selection: $selectedLanguage) {
+                    ForEach(LanguageOption.available) { lang in
+                        Text(lang.name).tag(lang.id)
                     }
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .tint(.blue)
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(maxWidth: .infinity)
             }
-            
-            Divider().background(.white.opacity(0.1))
-            
-            VStack(spacing: 10) {
-                // Chọn ngôn ngữ
-                HStack {
-                    Text("Language")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.7))
-                    Spacer()
-                    Picker("", selection: $selectedLanguage) {
-                        ForEach(LanguageOption.available) { lang in
-                            Text(lang.name).tag(lang.id)
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
+
+            // Hàng 2: Model
+            settingsRow(label: "Model") {
+                Picker("", selection: $selectedModel) {
+                    Text("Tiny").tag("tiny")
+                    Text("Small").tag("small")
+                    Text("Medium").tag("medium")
+                    Text("Turbo").tag("turbo")
                 }
-                
-                // License Key (Nhập trực tiếp)
-                HStack {
-                    Text("License")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.7))
-                    Spacer()
-                    TextField("XXXX-XXXX", text: $licenseKey)
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(maxWidth: .infinity)
+            }
+
+            // Hàng 3: License (Cân đối hoàn hảo với Picker)
+            settingsRow(label: "License") {
+                HStack(spacing: 8) {
+                    TextField("Enter key...", text: $licenseKey)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 12, design: .monospaced))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
-                        .frame(width: 150)
+                        .font(.system(size: 11, design: .monospaced))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.white.opacity(0.06))
+                        .cornerRadius(6)
+                    
+                    Button {
+                        print("Activating: \(licenseKey)")
+                    } label: {
+                        Text("Activate")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .background(isActivateHovered ? Color.blue : Color.blue.opacity(0.7))
+                            .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { isActivateHovered = $0 }
                 }
             }
+        }
+    }
+
+    // --- HELPER VIEW: ÉP LAYOUT CHUẨN MỰC ---
+    @ViewBuilder
+    private func settingsRow<Content: View>(label: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 0) {
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(0.5))
+                .frame(width: labelWidth, alignment: .leading) // Label luôn cố định 90
             
             Spacer(minLength: 0)
             
-            Text("Model: Whisper Large-v3 Turbo")
-                .font(.system(size: 10))
-                .foregroundStyle(.white.opacity(0.3))
+            content()
+                .frame(width: controlWidth) // Control luôn cố định 240
         }
     }
     
-    // MARK: - Sub-Components
-    
-    private var statusIndicator: some View {
-        Circle()
-            .fill(uiState.isRecording ? Color.red : Color.gray.opacity(0.6))
-            .frame(width: 10, height: 10)
-            .overlay {
-                if uiState.isRecording {
-                    Circle()
-                        .stroke(Color.red.opacity(0.35), lineWidth: 8)
-                        .scaleEffect(1.15)
-                        .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: uiState.isRecording)
-                }
-            }
-    }
-    
-    private var exitButton: some View {
-        Button {
-            NSApplication.shared.terminate(nil)
-        } label: {
-            Image(systemName: "xmark")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(isQuitHovered ? .white : .white.opacity(0.75))
+    // --- NÚT BẤM DÙNG CHUNG ---
+    @ViewBuilder
+    private func CircleButton(icon: String, isHovered: Binding<Bool>, activeColor: Color = .white.opacity(0.15), action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(isHovered.wrappedValue ? .white : .white.opacity(0.6))
                 .frame(width: 28, height: 28)
-                .background(isQuitHovered ? Color.red.opacity(0.8) : .white.opacity(0.08), in: Circle())
+                .background(isHovered.wrappedValue ? activeColor : Color.white.opacity(0.05))
+                .clipShape(Circle())
         }
         .buttonStyle(.plain)
-        .onHover { isQuitHovered = $0 }
+        .onHover { isHovered.wrappedValue = $0 }
     }
 
-    private var subtitleBlock: some View {
-        VStack(spacing: 8) {
-            if uiState.displayText.isEmpty {
-                Text(uiState.isRecording ? "Listening for system audio..." : "Tap to start transcribing")
-                    .font(.system(size: 15, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.6))
-                    .frame(maxWidth: .infinity, minHeight: 44)
-            } else {
-                Text(uiState.displayText)
-                    .font(.system(size: 18, weight: .medium, design: .default))
-                    .foregroundStyle(.white)
-                    .shadow(color: .black.opacity(0.8), radius: 1.5, x: 1, y: 1)
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .bottomLeading)
-            }
-        }
-        .padding(.horizontal, 4)
-        .frame(minHeight: 64, alignment: .bottomLeading)
+    private var statusIndicator: some View {
+        Circle()
+            .fill(uiState.isRecording ? Color.red : Color.gray.opacity(0.5))
+            .frame(width: 8, height: 8)
     }
 }
-
