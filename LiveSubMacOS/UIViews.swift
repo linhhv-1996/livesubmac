@@ -19,29 +19,32 @@ final class UIState: ObservableObject {
     }
 
     init() {
-        audioManager.onModelReady = { [weak self] in
-            guard let self else { return }
-            self.isModelReady = true
-            self.statusMessage = "Tap the panel to start transcription."
-        }
-
-        audioManager.onStatusChanged = { [weak self] status in
-            guard let self else { return }
-            self.statusMessage = status
-        }
-
-        audioManager.onSubtitleSnapshot = { [weak self] snapshot in
-            Task { @MainActor [weak self] in
-                self?.updateSubtitle(snapshot)
-            }
+        Task {
+            await audioManager.setCallbacks(
+                onModelReady: { [weak self] in
+                    guard let self else { return }
+                    self.isModelReady = true
+                    self.statusMessage = "Tap the panel to start transcription."
+                },
+                onStatusChanged: { [weak self] status in
+                    guard let self else { return }
+                    self.statusMessage = status
+                },
+                onSubtitleSnapshot: { [weak self] snapshot in
+                    Task { @MainActor [weak self] in
+                        self?.updateSubtitle(snapshot)
+                    }
+                }
+            )
         }
     }
 
     private func updateSubtitle(_ snapshot: SubtitleSnapshot) {
-        withAnimation(.easeOut(duration: 0.15)) {
-            stableLines = snapshot.stableLines
-            pendingText = snapshot.pendingText
-        }
+        // TỐI ƯU HUỶ DIỆT "NHẢY CHỮ": 
+        // Subtitle đã được bọc thành khối 2 dòng hoàn hảo bởi AudioStreamManager.
+        // Chỉ cần snap dòng cập nhật không dùng animation.
+        stableLines = snapshot.stableLines
+        pendingText = snapshot.pendingText
     }
 
     func toggleRecording() {
@@ -74,7 +77,9 @@ final class UIState: ObservableObject {
         stableLines = []
         pendingText = ""
         statusMessage = "Tap the panel to start transcription."
-        audioManager.stopCapture()
+        Task {
+            await audioManager.stopCapture()
+        }
     }
 }
 
@@ -166,6 +171,7 @@ struct DynamicIslandView: View {
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .bottomLeading)
+                    .contentTransition(.identity) 
             }
         }
         .padding(.horizontal, 16)
