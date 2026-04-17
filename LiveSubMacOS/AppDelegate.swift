@@ -69,8 +69,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         
         panel.isMovable = true
         panel.isMovableByWindowBackground = true
-        
-//        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.contentView = NSHostingView(rootView: DynamicIslandView(uiState: uiState))
         panel.orderFrontRegardless()

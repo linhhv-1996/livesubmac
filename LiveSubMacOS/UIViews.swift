@@ -189,77 +189,130 @@ struct DynamicIslandView: View {
         }
     }
 
-    // --- EXPANDED SETTINGS VIEW ---
+    // --- BẢN CHỐT: TỰ CODE VỎ 100%, KHÔNG DÙNG MẶC ĐỊNH ---
     private var settingsContent: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 12) {
+            
             // Hàng 1: Language
             settingsRow(label: "Language") {
-                Picker("", selection: $selectedLanguage) {
+                CustomDropdown(text: LanguageOption.available.first(where: { $0.id == selectedLanguage })?.name ?? "Select") {
                     ForEach(LanguageOption.available) { lang in
-                        Text(lang.name).tag(lang.id)
+                        Button(lang.name) { selectedLanguage = lang.id }
                     }
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(maxWidth: .infinity)
             }
 
             // Hàng 2: Model
             settingsRow(label: "Model") {
-                Picker("", selection: $selectedModel) {
-                    Text("Tiny").tag("tiny")
-                    Text("Small").tag("small")
-                    Text("Medium").tag("medium")
-                    Text("Turbo").tag("turbo")
+                CustomDropdown(text: selectedModel.capitalized) {
+                    Button("Tiny") { selectedModel = "tiny" }
+                    Button("Small") { selectedModel = "small" }
+                    Button("Medium") { selectedModel = "medium" }
+                    Button("Turbo") { selectedModel = "turbo" }
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .frame(maxWidth: .infinity)
             }
 
-            // Hàng 3: License (Cân đối hoàn hảo với Picker)
+            // Hàng 3: License
             settingsRow(label: "License") {
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    // Nửa 1: Input Field
                     TextField("Enter key...", text: $licenseKey)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.white)
                         .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(Color.white.opacity(0.06))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 30) // Fixed height 30
+                        .background(Color.white.opacity(0.08))
                         .cornerRadius(6)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
+                        )
                     
+                    // Nửa 2: Button
                     Button {
                         print("Activating: \(licenseKey)")
                     } label: {
                         Text("Activate")
-                            .font(.system(size: 10, weight: .bold))
+                            .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 5)
-                            .background(isActivateHovered ? Color.blue : Color.blue.opacity(0.7))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(isActivateHovered ? Color.blue : Color.blue.opacity(0.8))
                             .cornerRadius(6)
                     }
                     .buttonStyle(.plain)
+                    .frame(width: 75, height: 30) // Fixed height 30
                     .onHover { isActivateHovered = $0 }
                 }
             }
         }
     }
 
-    // --- HELPER VIEW: ÉP LAYOUT CHUẨN MỰC ---
+    // --- COMPONENT TỰ CODE (BẢN CHUẨN MƯỢT MÀ) ---
+    @ViewBuilder
+    private func CustomDropdown<Content: View>(text: String, @ViewBuilder items: () -> Content) -> some View {
+        Menu {
+            items()
+        } label: {
+            HStack {
+                Text(text)
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                
+                Spacer(minLength: 0)
+                
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.4))
+            }
+            .font(.system(size: 12))
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity)
+            .frame(height: 30)
+            // BÍ QUYẾT 1: Kích hoạt click cho toàn bộ khối (kể cả chỗ trống của Spacer)
+            .contentShape(Rectangle())
+            .background(Color.white.opacity(0.08))
+            .cornerRadius(6)
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
+            )
+        }
+        // BÍ QUYẾT 2: Ép Menu dùng style "Plain" để diệt gọn cái mũi tên "v" mặc định của macOS
+        .buttonStyle(.plain)
+    }
+
+    // --- HELPER VIEWS CẬP NHẬT ---
+    // 1. Dàn lề Label và Content
     @ViewBuilder
     private func settingsRow<Content: View>(label: String, @ViewBuilder content: () -> Content) -> some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 12) {
             Text(label)
-                .font(.system(size: 11))
-                .foregroundStyle(.white.opacity(0.5))
-                .frame(width: labelWidth, alignment: .leading) // Label luôn cố định 90
-            
-            Spacer(minLength: 0)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.6))
+                .frame(width: 70, alignment: .leading) // Label fix cứng 70px
             
             content()
-                .frame(width: controlWidth) // Control luôn cố định 240
+                .frame(maxWidth: .infinity) // Content bên phải tự giãn hết cỡ để bằng mép nhau
         }
+    }
+    
+    // 2. Cái "Hộp" thần thánh để đồng bộ mọi UI
+    @ViewBuilder
+    private func CustomControlBox<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        HStack {
+            content()
+        }
+        .font(.system(size: 12))
+        .padding(.horizontal, 10)
+        .frame(height: 30) // CHIỀU CAO CỐ ĐỊNH 30PX CHUẨN MỰC
+        .background(Color.white.opacity(0.08)) // Màu nền xám mờ
+        .cornerRadius(6)
+        .overlay( // Thêm cái viền mỏng 0.5px tạo cảm giác nổi khối 3D nhẹ
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
+        )
     }
     
     // --- NÚT BẤM DÙNG CHUNG ---
