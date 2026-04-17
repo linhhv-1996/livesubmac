@@ -6,11 +6,9 @@ import CoreML
 import WhisperKit
 
 // MARK: - Data Model
-
 struct SubtitleSnapshot: Sendable {
-    /// Các câu giao diện cần hiển thị (đã được bọc theo chuẩn 2 dòng, ko bị giật layout)
     let stableLines: [String]
-    let pendingText: String // Luôn rỗng vì logic bọc chữ nội bộ đã lo phần liveText
+    let pendingText: String
     
     var displayText: String {
         let parts = (stableLines + [pendingText])
@@ -21,17 +19,12 @@ struct SubtitleSnapshot: Sendable {
 }
 
 // MARK: - Audio Stream Manager
-
 actor AudioStreamManager: NSObject {
     // MARK: Constants
     private let sampleRate = 16_000
-    /// AI có thể nhìn tối đa 8 giây để lấy ngữ cảnh.
     private let processingWindowSize: Int = 128_000  // 8.0 giây
-    /// Đoạn âm thanh nhỏ gối đầu khi ngắt câu để không bị mất chữ đứng giữa ranh giới
     private let overlapSize: Int          = 8_000    // 0.5 giây
-    /// Trái tim của Ultra-low latency: Cứ 0.25s là bơm âm thanh cho AI dịch!
     private let minProcessInterval: TimeInterval = 0.25
-    /// Cửa sổ kiểm tra giọng đọc
     private let vadWindowSize: Int        = 8_000    // 0.5 giây
 
     // MARK: State
@@ -67,48 +60,107 @@ actor AudioStreamManager: NSObject {
 
     override init() {
         super.init()
-        Task { await self.setupWhisper() }
     }
 
-    // MARK: - Setup
+    // MARK: - Setup & Model Management
 
-    private func setupWhisper() async {
+    private let modelLinks: [String: String] = [
+        "tiny": "https://huggingface.co/buckets/hvlinhtptn/livesub/resolve/openai_whisper-tiny.zip?download=true",
+        "small": "https://huggingface.co/buckets/hvlinhtptn/livesub/resolve/openai_whisper-small.zip?download=true",
+        "medium": "https://huggingface.co/buckets/hvlinhtptn/livesub/resolve/openai_whisper-medium.zip?download=true",
+        "turbo": "https://huggingface.co/buckets/hvlinhtptn/livesub/resolve/openai_whisper-large-v3-v20240930_626MB.zip?download=true"
+    ]
+
+    func prepareModel() async {
+        if isCapturing { stopCapture() }
+        whisper = nil
+        
+        let targetModel = defaults.string(forKey: "selectedModel") ?? "small"
+        if defaults.string(forKey: "selectedModel") == nil {
+            defaults.set("small", forKey: "selectedModel")
+        }
+        
+        await setupWhisper(modelType: targetModel)
+    }
+    
+    private func setupWhisper(modelType: String) async {
+        print("🛠️ DEBUG [1]: Bắt đầu setupWhisper với model: \(modelType)")
         do {
             let config = WhisperKitConfig()
-
-            let testModelPath = "/Users/linhhv/Documents/huggingface/models/argmaxinc/whisperkit-coreml/openai_whisper-small"
-            let externalModelURL = URL(fileURLWithPath: testModelPath)
-            let modelName = externalModelURL.lastPathComponent
-
-            if FileManager.default.fileExists(atPath: externalModelURL.appendingPathComponent("AudioEncoder.mlmodelc").path) {
-                await sendStatus("Loading test model: \(modelName)...")
-                config.modelFolder = testModelPath
-                config.download = false
-                config.verbose = false
-                config.computeOptions = ModelComputeOptions(audioEncoderCompute: .cpuAndNeuralEngine, textDecoderCompute: .cpuAndNeuralEngine)
-            } else if let resourcesURL = Bundle.main.resourceURL,
-                      FileManager.default.fileExists(atPath: resourcesURL.appendingPathComponent("AudioEncoder.mlmodelc").path) {
-                await sendStatus("Loading bundled model (offline)...")
-                config.model = "whisper-large-v3-v20240930-turbo-632MB"
-                config.modelFolder = resourcesURL.path
-                config.download = false
-                config.verbose = false
-                config.computeOptions = ModelComputeOptions(audioEncoderCompute: .cpuAndNeuralEngine, textDecoderCompute: .cpuAndNeuralEngine)
-            } else {
-                await sendStatus("Downloading speech model...")
-                let modelURL = try await WhisperKit.download(variant: "large-v3")
-                config.modelFolder = modelURL.path
+            let appSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            let modelsDirectory = appSupportURL.appendingPathComponent("LiveSubModels", isDirectory: true)
+            
+            print("🛠️ DEBUG [2]: Thư mục chứa model: \(modelsDirectory.path)")
+            
+            if !FileManager.default.fileExists(atPath: modelsDirectory.path) {
+                try FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
+                print("🛠️ DEBUG [3]: Đã tạo thư mục LiveSubModels")
             }
+            
+            let folderName = (modelType == "turbo") ? "openai_whisper-large-v3-v20240930_626MB" : "openai_whisper-\(modelType)"
+            let finalModelPath = modelsDirectory.appendingPathComponent(folderName)
+            let encoderPath = finalModelPath.appendingPathComponent("AudioEncoder.mlmodelc").path
+            
+            if !FileManager.default.fileExists(atPath: encoderPath) {
+                print("🛠️ DEBUG [4]: Chưa có model, chuẩn bị tải...")
+                await sendStatus("Downloading \(modelType.capitalized) model...")
+                
+                guard let urlString = modelLinks[modelType], let zipURL = URL(string: urlString) else {
+                    print("🔥 DEBUG ERROR: URL không hợp lệ")
+                    await sendStatus("Error: Invalid model URL.")
+                    return
+                }
+                
+                print("🛠️ DEBUG [5]: Bắt đầu tải từ \(zipURL)... (Bước này có thể kẹt do mạng)")
+                let (tempZipURL, response) = try await URLSession.shared.download(from: zipURL)
+                guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                    print("🔥 DEBUG ERROR: Lỗi mạng HTTP Code khác 200")
+                    await sendStatus("Error: Failed to download model.")
+                    return
+                }
+                
+                print("🛠️ DEBUG [6]: Tải xong! Bắt đầu giải nén file zip bằng Process...")
+                await sendStatus("Extracting model...")
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+                process.arguments = ["-o", tempZipURL.path, "-d", modelsDirectory.path]
+                
+                try process.run()
+                process.waitUntilExit()
+                print("🛠️ DEBUG [7]: Giải nén xong (Exit code: \(process.terminationStatus))")
+                
+                try? FileManager.default.removeItem(at: tempZipURL)
+                
+                if !FileManager.default.fileExists(atPath: encoderPath) {
+                    print("🔥 DEBUG ERROR: Giải nén xong nhưng KHÔNG THẤY file AudioEncoder.mlmodelc")
+                    await sendStatus("Error: Not found AudioEncoder.mlmodelc.")
+                    return
+                }
+            } else {
+                print("🛠️ DEBUG [4b]: Đã tìm thấy model có sẵn trên máy, bỏ qua bước tải.")
+            }
+            
+            print("🛠️ DEBUG [8]: Bắt đầu load WhisperKit vào bộ nhớ (BƯỚC NÀY HAY TREO NHẤT)...")
+            await sendStatus("Loading \(modelType.capitalized) model into memory...")
+            config.modelFolder = finalModelPath.path
+            config.download = false
+            config.verbose = true
+            
+            config.computeOptions = ModelComputeOptions(audioEncoderCompute: .cpuAndGPU, textDecoderCompute: .cpuAndGPU)
 
             whisper = try await WhisperKit(config)
+            print("✅ DEBUG [9]: KHỞI TẠO WHISPERKIT THÀNH CÔNG!")
+            
             let cb = onModelReady
             await MainActor.run { cb?() }
 
         } catch {
-            await sendStatus("Model setup failed: \(error.localizedDescription)")
+            print("🔥 DEBUG CATCH ERROR: Bị văng lỗi: \(error)")
+            await sendStatus("Error: Model setup failed: \(error.localizedDescription)")
         }
     }
-
+    
+    
     // MARK: - Capture Control
 
     func startCapture() async -> Bool {
@@ -133,7 +185,7 @@ actor AudioStreamManager: NSObject {
             streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: 2)
             streamConfig.queueDepth = 5
 
-            let bridge = await StreamBridge(manager: self)
+            let bridge = StreamBridge(manager: self)
             self.streamBridge = bridge
             let newStream = SCStream(filter: filter, configuration: streamConfig, delegate: bridge)
             try newStream.addStreamOutput(bridge, type: .audio, sampleHandlerQueue: .global(qos: .userInteractive))
@@ -177,7 +229,6 @@ actor AudioStreamManager: NSObject {
 
         audioBuffer.append(contentsOf: samples)
 
-        // Không bao giờ để mảng lớn hơn processingWindowSize (8s) để tranh OOM. 
         if audioBuffer.count > processingWindowSize {
             audioBuffer = Array(audioBuffer.suffix(processingWindowSize))
         }
@@ -185,12 +236,11 @@ actor AudioStreamManager: NSObject {
         let now = Date()
         guard now.timeIntervalSince(lastProcessTime) >= minProcessInterval,
               !isTranscribing,
-              audioBuffer.count >= sampleRate / 5 // Tích được cỡ 0.2s âm thanh là dịch ngay!
+              audioBuffer.count >= sampleRate / 5
         else { return }
 
         let window = audioBuffer
         
-        // Block VAD tĩnh: Nếu chỉ là nhiễu nền rác rưởi, không gọi AI cho đỡ tốn pin.
         guard isActive(window) else {
             if audioBuffer.count > sampleRate * 3 {
                 audioBuffer.removeAll(keepingCapacity: true)
@@ -235,7 +285,7 @@ actor AudioStreamManager: NSObject {
         }
     }
 
-    // MARK: - Result Processing & Logic chốt chữ
+    // MARK: - Result Processing
 
     private func processTranscriptionResult(_ newLiveText: String, tailSilent: Bool, windowSize: Int) async {
         let changed = newLiveText != liveText
@@ -246,7 +296,6 @@ actor AudioStreamManager: NSObject {
 
         let windowDuration = Double(windowSize) / Double(sampleRate)
 
-        // Nếu ngâm quá lâu không có biến (sau 8s tĩnh), dọn dẹp sạch sẽ
         if !changed, Date().timeIntervalSince(lastTranscriptionChangeTime) > 8.0, (!committedText.isEmpty || !liveText.isEmpty) {
             committedText = ""
             liveText = ""
@@ -259,15 +308,12 @@ actor AudioStreamManager: NSObject {
             pushSnapshot()
         }
 
-        // TỐI ƯU CỐT LÕI: Chỉ chặn dòng chốt câu khi ĐƯỢC PHÉP CHỐT: 
-        // Lệnh ngắt câu rơi vào khi Đuôi câu yên tĩnh (>0.8s) HOẶC bộ đệm đã cứng tới 7.5s (tránh nhai đi nhai lại cục quá to).
         let shouldCommit = (tailSilent && windowDuration > 0.8) || windowDuration >= 7.5
 
         if shouldCommit, !liveText.isEmpty {
             let separator = committedText.isEmpty ? "" : " "
             let combined = committedText + separator + liveText
             
-            // Xoá cuộn - gói văn bản để không làm tràn biến nhớ
             let words = combined.split(separator: " ").map { String($0) }
             var tempLines: [String] = []
             var tLine = ""
@@ -310,7 +356,7 @@ actor AudioStreamManager: NSObject {
         let words = formatted.split(separator: " ").map { String($0) }
         var lines: [String] = []
         var currentLine = ""
-        let maxLineLength = 40 // Thuật toán bọc cứng khung nhìn chống phình/ngóp bong bóng UI nhảy loạn
+        let maxLineLength = 40
         
         for word in words {
             if currentLine.isEmpty {
@@ -329,7 +375,6 @@ actor AudioStreamManager: NSObject {
         let displayLines = Array(lines.suffix(2))
         let snapshot = SubtitleSnapshot(stableLines: displayLines, pendingText: "")
         
-        // Tránh flood UI nếu kết xuất bề mặt giống y hệt nhau
         let comparableString = snapshot.displayText
         guard comparableString != lastDeliveredSnapshotText else { return }
         lastDeliveredSnapshotText = comparableString
@@ -354,7 +399,7 @@ actor AudioStreamManager: NSObject {
         var sumSq: Float = 0
         for s in tail { sumSq += s * s }
         let rms = sqrt(sumSq / Float(vadWindowSize))
-        return rms < 0.015 
+        return rms < 0.015
     }
 
     // MARK: - Text Processing
@@ -469,69 +514,3 @@ private final class StreamBridge: NSObject, SCStreamOutput, SCStreamDelegate, @u
     }
 }
 
-//private final class StreamBridge: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
-//    private weak var manager: AudioStreamManager?
-//
-//    init(manager: AudioStreamManager) {
-//        self.manager = manager
-//    }
-//
-//    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-//        guard type == .audio,
-//              let samples = extractFloatSamples(from: sampleBuffer),
-//              !samples.isEmpty,
-//              let mgr = manager else { return }
-//
-//        Task { await mgr.ingestSamples(samples) }
-//    }
-//
-//    func stream(_ stream: SCStream, didStopWithError error: Error) {
-//        guard let mgr = manager else { return }
-//        Task {
-//            await mgr.stopCapture()
-//            let cb = await mgr.onStatusChanged
-//            await MainActor.run { cb?("Capture stopped: \(error.localizedDescription)") }
-//        }
-//    }
-//
-//    private func extractFloatSamples(from sampleBuffer: CMSampleBuffer) -> [Float]? {
-//        guard let fmt = CMSampleBufferGetFormatDescription(sampleBuffer),
-//              let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(fmt) else { return nil }
-//
-//        let asbd = asbdPtr.pointee
-//        let isFloat = asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0
-//        let isInt   = asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger != 0
-//
-//        var abl = AudioBufferList(
-//            mNumberBuffers: 1,
-//            mBuffers: AudioBuffer(mNumberChannels: 1, mDataByteSize: 0, mData: nil)
-//        )
-//        var blockBuffer: CMBlockBuffer?
-//        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-//            sampleBuffer, bufferListSizeNeededOut: nil,
-//            bufferListOut: &abl,
-//            bufferListSize: MemoryLayout<AudioBufferList>.size,
-//            blockBufferAllocator: kCFAllocatorDefault,
-//            blockBufferMemoryAllocator: kCFAllocatorDefault,
-//            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
-//            blockBufferOut: &blockBuffer
-//        )
-//        guard status == noErr else { return nil }
-//
-//        var result: [Float] = []
-//        result.reserveCapacity(Int(abl.mBuffers.mDataByteSize) / MemoryLayout<Float>.size)
-//
-//        for buf in UnsafeMutableAudioBufferListPointer(&abl) {
-//            guard let data = buf.mData else { continue }
-//            if isFloat {
-//                let count = Int(buf.mDataByteSize) / MemoryLayout<Float>.size
-//                result.append(contentsOf: UnsafeBufferPointer(start: data.bindMemory(to: Float.self, capacity: count), count: count))
-//            } else if isInt {
-//                let count = Int(buf.mDataByteSize) / MemoryLayout<Int16>.size
-//                let ptr = data.bindMemory(to: Int16.self, capacity: count)
-//                result.append(contentsOf: UnsafeBufferPointer(start: ptr, count: count).map { Float($0) / Float(Int16.max) })
-//            }
-//        }
-//        return result
-//    }
-//}

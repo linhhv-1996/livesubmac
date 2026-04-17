@@ -1,17 +1,28 @@
 import SwiftUI
 import Combine
-import CoreGraphics // Cần thiết để gọi hàm check quyền màn hình
-import AppKit // Để gọi NSWorkspace mở Settings
+import CoreGraphics
+import AppKit
 
+// MARK: - Trạng thái App
+enum AppStatus: Equatable {
+    case loadingApp
+    case downloadingModel(progress: Double)
+    case loadingModel
+    case missingPermission
+    case ready
+    case recording
+    case error(String)
+}
+
+// MARK: - UIState Logic
 @MainActor
 final class UIState: ObservableObject {
-    @Published var isRecording = false
+    @Published var status: AppStatus = .loadingApp
     @Published var stableLines: [String] = []
     @Published var pendingText = ""
-    @Published var isModelReady = false
-    @Published var statusMessage = "Loading speech model..."
     
-    @Published var hasScreenRecordPermission = false
+    var isRecording: Bool { status == .recording }
+    var hasScreenRecordPermission: Bool = false
 
     private let audioManager = AudioStreamManager()
 
@@ -23,18 +34,23 @@ final class UIState: ObservableObject {
     }
 
     init() {
-        checkPermission() // Check quyền ngay khi khởi tạo
+        checkPermission()
         
         Task {
             await audioManager.setCallbacks(
                 onModelReady: { [weak self] in
                     guard let self else { return }
-                    self.isModelReady = true
-                    self.statusMessage = "Tap the panel to start transcription."
+                    self.updateStatusBasedOnState()
                 },
-                onStatusChanged: { [weak self] status in
-                    guard let self else { return }
-                    self.statusMessage = status
+                onStatusChanged: { [weak self] statusMsg in
+                    let lowerMsg = statusMsg.lowercased()
+                    if lowerMsg.contains("downloading") {
+                        self?.status = .downloadingModel(progress: 0)
+                    } else if lowerMsg.contains("loading") {
+                        self?.status = .loadingModel
+                    } else if lowerMsg.contains("failed") || lowerMsg.contains("error") || lowerMsg.contains("not found") {
+                        self?.status = .error(statusMsg)
+                    }
                 },
                 onSubtitleSnapshot: { [weak self] snapshot in
                     Task { @MainActor [weak self] in
@@ -42,95 +58,99 @@ final class UIState: ObservableObject {
                     }
                 }
             )
+            // Khởi chạy manager
+            await audioManager.prepareModel()
         }
         
-        // Lắng nghe khi user từ System Settings quay lại app để check quyền lại
         Task { @MainActor [weak self] in
             let notifications = NotificationCenter.default.notifications(named: NSApplication.didBecomeActiveNotification)
             for await _ in notifications {
                 guard let self else { break }
                 self.checkPermission()
-                self.updateStatusBasedOnPermission()
+                self.updateStatusBasedOnState()
             }
         }
     }
     
-    
-    // MARK: - Permission Logic
     func checkPermission() {
-        // Hàm này không hiện popup, chỉ trả về true/false xem đã có quyền chưa
         hasScreenRecordPermission = CGPreflightScreenCaptureAccess()
     }
     
     func requestPermission() {
-        // Hàm này sẽ trigger popup của macOS nếu chưa xin bao giờ
-        let granted = CGRequestScreenCaptureAccess()
-        hasScreenRecordPermission = granted
-        
-        if !granted {
-            // Mở thẳng trang Cài đặt -> Quyền riêng tư -> Ghi màn hình
+        hasScreenRecordPermission = CGRequestScreenCaptureAccess()
+        if !hasScreenRecordPermission {
             let urlString = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
             if let url = URL(string: urlString) {
                 NSWorkspace.shared.open(url)
             }
-            statusMessage = "Please allow Screen Recording in Settings."
         }
+        updateStatusBasedOnState()
     }
     
-    private func updateStatusBasedOnPermission() {
-        guard isModelReady else { return }
+    private func updateStatusBasedOnState() {
         if hasScreenRecordPermission {
-            statusMessage = "Tap the panel to start transcription."
+            status = .ready
         } else {
-            statusMessage = "Missing Screen Recording permission."
+            status = .missingPermission
         }
+        print("📱 UI Status updated to: \(status)")
     }
 
-    // MARK: - Actions
     private func updateSubtitle(_ snapshot: SubtitleSnapshot) {
-        // TỐI ƯU HUỶ DIỆT "NHẢY CHỮ": 
-        // Subtitle đã được bọc thành khối 2 dòng hoàn hảo bởi AudioStreamManager.
-        // Chỉ cần snap dòng cập nhật không dùng animation.
         stableLines = snapshot.stableLines
         pendingText = snapshot.pendingText
     }
 
     func toggleRecording() {
-        guard isModelReady else { return }
-
-        if isRecording {
+        if status == .recording {
             stopRecording()
-        } else {
+        } else if status == .ready {
             startRecording()
+        } else if status == .missingPermission {
+            requestPermission()
         }
     }
 
     private func startRecording() {
-        isRecording = true
-        statusMessage = "Starting capture..."
-
+        status = .loadingModel // Trạng thái đệm trước khi capture thực sự chạy
         Task {
             let didStart = await audioManager.startCapture()
-            if !didStart {
-                await MainActor.run {
-                    self.isRecording = false
-                    self.statusMessage = "Unable to start capture. Check screen recording permission."
-                }
+            if didStart {
+                await MainActor.run { self.status = .recording }
+            } else {
+                await MainActor.run { self.updateStatusBasedOnState() }
             }
         }
     }
 
     private func stopRecording() {
-        isRecording = false
         stableLines = []
         pendingText = ""
-        statusMessage = "Tap the panel to start transcription."
         Task {
             await audioManager.stopCapture()
+            await MainActor.run { self.updateStatusBasedOnState() }
+        }
+    }
+    
+    // Gọi hàm này khi user đổi model trong settings
+    func reloadModel() {
+        status = .loadingModel
+        Task {
+            await audioManager.prepareModel()
+            self.updateStatusAfterLabels()
+        }
+    }
+    
+    private func updateStatusAfterLabels() {
+        if hasScreenRecordPermission {
+            self.status = .ready
+        } else {
+            self.status = .missingPermission
         }
     }
 }
 
+// MARK: - Views
 struct DynamicIslandView: View {
     @ObservedObject var uiState: UIState
     
@@ -140,18 +160,11 @@ struct DynamicIslandView: View {
     @State private var isActivateHovered = false
     
     @AppStorage("selectedLanguage") private var selectedLanguage = "en-US"
-    @AppStorage("selectedModel") private var selectedModel = "turbo"
+    @AppStorage("selectedModel") private var selectedModel = "small"
     @AppStorage("licenseKey") private var licenseKey = ""
 
-    // Kích thước cố định để gióng hàng cột Setting bên dưới
-    private let labelWidth: CGFloat = 90
-    private let controlWidth: CGFloat = 240
-
     var body: some View {
-        // VStack tổng: Tự động tính toán chiều cao dựa trên content bên trong
         VStack(spacing: 0) {
-            
-            // 1. PHẦN SUBTITLE CHÍNH (Luôn hiển thị)
             mainSubtitleContent
                 .padding(.horizontal, 20)
                 .padding(.vertical, 16)
@@ -160,7 +173,6 @@ struct DynamicIslandView: View {
                     if !isSettingsMode { uiState.toggleRecording() }
                 }
             
-            // 2. PHẦN SETTING (Nở ra khi click vào nút Gear)
             if isSettingsMode {
                 Divider()
                     .background(.white.opacity(0.15))
@@ -169,11 +181,9 @@ struct DynamicIslandView: View {
                 settingsContent
                     .padding(.horizontal, 20)
                     .padding(.vertical, 16)
-                    // Hiệu ứng trượt từ trên xuống khi bung ra
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        // Background và Viền áp dụng cho TOÀN BỘ VStack tổng
         .background(
             LinearGradient(
                 colors: [Color(red: 0.1, green: 0.1, blue: 0.12), Color.black],
@@ -187,9 +197,7 @@ struct DynamicIslandView: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .padding(.top, 6)
-        // Animation sẽ làm panel co giãn mượt mà khi isSettingsMode thay đổi
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isSettingsMode)
-        // Đặt max size thay vì fix cứng frame, đẩy view lên trên cùng của NSPanel
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
@@ -200,10 +208,10 @@ struct DynamicIslandView: View {
                 statusIndicator
                 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(uiState.isRecording ? "LIVE SUBTITLE" : "READY")
+                    Text(titleText)
                         .font(.system(size: 10, weight: .black, design: .rounded))
                         .foregroundStyle(.white.opacity(0.9))
-                    Text(uiState.statusMessage)
+                    Text(subtitleText)
                         .font(.system(size: 10))
                         .foregroundStyle(.white.opacity(0.6))
                         .lineLimit(1)
@@ -211,7 +219,6 @@ struct DynamicIslandView: View {
                 
                 Spacer()
                 
-                // Nút Gear giờ sẽ đóng/mở panel thay vì chuyển cảnh
                 CircleButton(icon: isSettingsMode ? "chevron.up" : "gearshape.fill", isHovered: $isSettingsHovered) {
                     isSettingsMode.toggle()
                 }
@@ -221,36 +228,73 @@ struct DynamicIslandView: View {
                 }
             }
             
-            // Khối hiển thị chữ (Fix minHeight để nó không bị lép khi không có chữ)
             if uiState.displayText.isEmpty {
-                
-                if !uiState.hasScreenRecordPermission {
-                    // Cảnh báo nổi bật nếu thiếu quyền
-                    Text("Grant Permission to Start")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundStyle(.orange)
-                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .center)
-                } else {
-                    Text(uiState.isRecording ? "Listening..." : "Tap to start")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.6))
-                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .center)
-                }
+                Text(actionText)
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(actionTextColor)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .center)
             } else {
                 Text(uiState.displayText)
                     .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(.white)
                     .lineLimit(2)
-                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .topLeading) // ÉP GÓC TRÊN BÊN TRÁI
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .topLeading)
             }
         }
     }
 
-    // --- BẢN CHỐT: TỰ CODE VỎ 100%, KHÔNG DÙNG MẶC ĐỊNH ---
+    // --- TEXT LOGIC ---
+    private var titleText: String {
+        switch uiState.status {
+        case .recording: return "LIVE SUBTITLE"
+        case .ready: return "READY"
+        case .missingPermission: return "PERMISSION REQUIRED"
+        case .downloadingModel: return "DOWNLOADING"
+        case .loadingModel, .loadingApp: return "INITIALIZING"
+        case .error: return "SYSTEM ERROR"
+        }
+    }
+    
+    private var subtitleText: String {
+        switch uiState.status {
+        case .recording: return "Listening to system audio..."
+        case .ready: return "Model loaded. Tap to start."
+        case .missingPermission: return "Check Screen Recording settings"
+        case .downloadingModel: return "Downloading AI model (First time)..."
+        case .loadingModel, .loadingApp: return "Loading speech model into memory..."
+        case .error(let msg): return msg
+        }
+    }
+    
+    private var actionText: String {
+        switch uiState.status {
+        case .recording: return "Listening..."
+        case .ready: return "Tap to start transcription"
+        case .missingPermission: return "Grant Permission to Start"
+        case .downloadingModel: return "Downloading model, please wait..."
+        case .loadingModel, .loadingApp: return "Warming up AI..."
+        case .error: return "Tap to retry"
+        }
+    }
+    
+    private var statusIndicator: some View {
+        Circle()
+            .fill(uiState.isRecording ? Color.red : (uiState.status == .ready ? Color.green : Color.orange))
+            .frame(width: 8, height: 8)
+    }
+    
+    private var actionTextColor: Color {
+        switch uiState.status {
+        case .missingPermission, .error:
+            return .orange
+        default:
+            return .white.opacity(0.6)
+        }
+    }
+
+    // --- SETTINGS CONTENT ---
     private var settingsContent: some View {
         VStack(spacing: 12) {
-            
-            // Hàng 1: Language
             settingsRow(label: "Language") {
                 CustomDropdown(text: LanguageOption.available.first(where: { $0.id == selectedLanguage })?.name ?? "Select") {
                     ForEach(LanguageOption.available) { lang in
@@ -259,27 +303,24 @@ struct DynamicIslandView: View {
                 }
             }
 
-            // Hàng 2: Model
             settingsRow(label: "Model") {
                 CustomDropdown(text: selectedModel.capitalized) {
-                    Button("Tiny") { selectedModel = "tiny" }
-                    Button("Small") { selectedModel = "small" }
-                    Button("Medium") { selectedModel = "medium" }
-                    Button("Turbo") { selectedModel = "turbo" }
+                    Button("Tiny") { selectedModel = "tiny"; uiState.reloadModel() }
+                    Button("Small") { selectedModel = "small"; uiState.reloadModel() }
+                    Button("Medium") { selectedModel = "medium"; uiState.reloadModel() }
+                    Button("Turbo") { selectedModel = "turbo"; uiState.reloadModel() }
                 }
             }
 
-            // Hàng 3: License
             settingsRow(label: "License") {
                 HStack(spacing: 6) {
-                    // Nửa 1: Input Field
                     TextField("Enter key...", text: $licenseKey)
                         .textFieldStyle(.plain)
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 10)
                         .frame(maxWidth: .infinity)
-                        .frame(height: 30) // Fixed height 30
+                        .frame(height: 30)
                         .background(Color.white.opacity(0.08))
                         .cornerRadius(6)
                         .overlay(
@@ -287,7 +328,6 @@ struct DynamicIslandView: View {
                                 .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
                         )
                     
-                    // Nửa 2: Button
                     Button {
                         print("Activating: \(licenseKey)")
                     } label: {
@@ -299,14 +339,14 @@ struct DynamicIslandView: View {
                             .cornerRadius(6)
                     }
                     .buttonStyle(.plain)
-                    .frame(width: 75, height: 30) // Fixed height 30
+                    .frame(width: 75, height: 30)
                     .onHover { isActivateHovered = $0 }
                 }
             }
         }
     }
 
-    // --- COMPONENT TỰ CODE (BẢN CHUẨN MƯỢT MÀ) ---
+    // --- HELPER VIEWS ---
     @ViewBuilder
     private func CustomDropdown<Content: View>(text: String, @ViewBuilder items: () -> Content) -> some View {
         Menu {
@@ -327,7 +367,6 @@ struct DynamicIslandView: View {
             .padding(.horizontal, 10)
             .frame(maxWidth: .infinity)
             .frame(height: 30)
-            // BÍ QUYẾT 1: Kích hoạt click cho toàn bộ khối (kể cả chỗ trống của Spacer)
             .contentShape(Rectangle())
             .background(Color.white.opacity(0.08))
             .cornerRadius(6)
@@ -336,43 +375,22 @@ struct DynamicIslandView: View {
                     .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
             )
         }
-        // BÍ QUYẾT 2: Ép Menu dùng style "Plain" để diệt gọn cái mũi tên "v" mặc định của macOS
         .buttonStyle(.plain)
     }
 
-    // --- HELPER VIEWS CẬP NHẬT ---
-    // 1. Dàn lề Label và Content
     @ViewBuilder
     private func settingsRow<Content: View>(label: String, @ViewBuilder content: () -> Content) -> some View {
         HStack(spacing: 12) {
             Text(label)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.white.opacity(0.6))
-                .frame(width: 70, alignment: .leading) // Label fix cứng 70px
+                .frame(width: 70, alignment: .leading)
             
             content()
-                .frame(maxWidth: .infinity) // Content bên phải tự giãn hết cỡ để bằng mép nhau
+                .frame(maxWidth: .infinity)
         }
     }
     
-    // 2. Cái "Hộp" thần thánh để đồng bộ mọi UI
-    @ViewBuilder
-    private func CustomControlBox<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        HStack {
-            content()
-        }
-        .font(.system(size: 12))
-        .padding(.horizontal, 10)
-        .frame(height: 30) // CHIỀU CAO CỐ ĐỊNH 30PX CHUẨN MỰC
-        .background(Color.white.opacity(0.08)) // Màu nền xám mờ
-        .cornerRadius(6)
-        .overlay( // Thêm cái viền mỏng 0.5px tạo cảm giác nổi khối 3D nhẹ
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
-        )
-    }
-    
-    // --- NÚT BẤM DÙNG CHUNG ---
     @ViewBuilder
     private func CircleButton(icon: String, isHovered: Binding<Bool>, activeColor: Color = .white.opacity(0.15), action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -386,10 +404,5 @@ struct DynamicIslandView: View {
         .buttonStyle(.plain)
         .onHover { isHovered.wrappedValue = $0 }
     }
-
-    private var statusIndicator: some View {
-        Circle()
-            .fill(uiState.isRecording ? Color.red : Color.gray.opacity(0.5))
-            .frame(width: 8, height: 8)
-    }
 }
+
