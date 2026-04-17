@@ -65,7 +65,7 @@ actor AudioStreamManager: NSObject {
 
     private nonisolated let defaults = UserDefaults.standard
 
-    override nonisolated init() {
+    override init() {
         super.init()
         Task { await self.setupWhisper() }
     }
@@ -137,6 +137,7 @@ actor AudioStreamManager: NSObject {
             self.streamBridge = bridge
             let newStream = SCStream(filter: filter, configuration: streamConfig, delegate: bridge)
             try newStream.addStreamOutput(bridge, type: .audio, sampleHandlerQueue: .global(qos: .userInteractive))
+            try newStream.addStreamOutput(bridge, type: .screen, sampleHandlerQueue: .global(qos: .background))
             try await newStream.startCapture()
 
             stream = newStream
@@ -390,29 +391,25 @@ actor AudioStreamManager: NSObject {
     private nonisolated func preferredLanguageCode() -> String? {
         guard let id = defaults.string(forKey: "selectedLanguage"), !id.isEmpty else { return nil }
         let locale = Locale(identifier: id)
-        if #available(macOS 13.0, *) {
-            return locale.language.languageCode?.identifier
-        } else {
-            return locale.languageCode
-        }
+        return locale.language.languageCode?.identifier
     }
 
     private func sendStatus(_ msg: String) async {
-        let cb = await onStatusChanged
+        let cb = onStatusChanged
         await MainActor.run { cb?(msg) }
     }
 }
 
 // MARK: - StreamBridge
-
 private final class StreamBridge: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     private weak var manager: AudioStreamManager?
 
     init(manager: AudioStreamManager) {
         self.manager = manager
+        super.init()
     }
 
-    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+    nonisolated func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio,
               let samples = extractFloatSamples(from: sampleBuffer),
               !samples.isEmpty,
@@ -421,7 +418,7 @@ private final class StreamBridge: NSObject, SCStreamOutput, SCStreamDelegate, @u
         Task { await mgr.ingestSamples(samples) }
     }
 
-    func stream(_ stream: SCStream, didStopWithError error: Error) {
+    nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
         guard let mgr = manager else { return }
         Task {
             await mgr.stopCapture()
@@ -430,7 +427,7 @@ private final class StreamBridge: NSObject, SCStreamOutput, SCStreamDelegate, @u
         }
     }
 
-    private func extractFloatSamples(from sampleBuffer: CMSampleBuffer) -> [Float]? {
+    private nonisolated func extractFloatSamples(from sampleBuffer: CMSampleBuffer) -> [Float]? {
         guard let fmt = CMSampleBufferGetFormatDescription(sampleBuffer),
               let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(fmt) else { return nil }
 
@@ -471,3 +468,70 @@ private final class StreamBridge: NSObject, SCStreamOutput, SCStreamDelegate, @u
         return result
     }
 }
+
+//private final class StreamBridge: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+//    private weak var manager: AudioStreamManager?
+//
+//    init(manager: AudioStreamManager) {
+//        self.manager = manager
+//    }
+//
+//    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+//        guard type == .audio,
+//              let samples = extractFloatSamples(from: sampleBuffer),
+//              !samples.isEmpty,
+//              let mgr = manager else { return }
+//
+//        Task { await mgr.ingestSamples(samples) }
+//    }
+//
+//    func stream(_ stream: SCStream, didStopWithError error: Error) {
+//        guard let mgr = manager else { return }
+//        Task {
+//            await mgr.stopCapture()
+//            let cb = await mgr.onStatusChanged
+//            await MainActor.run { cb?("Capture stopped: \(error.localizedDescription)") }
+//        }
+//    }
+//
+//    private func extractFloatSamples(from sampleBuffer: CMSampleBuffer) -> [Float]? {
+//        guard let fmt = CMSampleBufferGetFormatDescription(sampleBuffer),
+//              let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(fmt) else { return nil }
+//
+//        let asbd = asbdPtr.pointee
+//        let isFloat = asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0
+//        let isInt   = asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger != 0
+//
+//        var abl = AudioBufferList(
+//            mNumberBuffers: 1,
+//            mBuffers: AudioBuffer(mNumberChannels: 1, mDataByteSize: 0, mData: nil)
+//        )
+//        var blockBuffer: CMBlockBuffer?
+//        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+//            sampleBuffer, bufferListSizeNeededOut: nil,
+//            bufferListOut: &abl,
+//            bufferListSize: MemoryLayout<AudioBufferList>.size,
+//            blockBufferAllocator: kCFAllocatorDefault,
+//            blockBufferMemoryAllocator: kCFAllocatorDefault,
+//            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+//            blockBufferOut: &blockBuffer
+//        )
+//        guard status == noErr else { return nil }
+//
+//        var result: [Float] = []
+//        result.reserveCapacity(Int(abl.mBuffers.mDataByteSize) / MemoryLayout<Float>.size)
+//
+//        for buf in UnsafeMutableAudioBufferListPointer(&abl) {
+//            guard let data = buf.mData else { continue }
+//            if isFloat {
+//                let count = Int(buf.mDataByteSize) / MemoryLayout<Float>.size
+//                result.append(contentsOf: UnsafeBufferPointer(start: data.bindMemory(to: Float.self, capacity: count), count: count))
+//            } else if isInt {
+//                let count = Int(buf.mDataByteSize) / MemoryLayout<Int16>.size
+//                let ptr = data.bindMemory(to: Int16.self, capacity: count)
+//                result.append(contentsOf: UnsafeBufferPointer(start: ptr, count: count).map { Float($0) / Float(Int16.max) })
+//            }
+//        }
+//        return result
+//    }
+//}
