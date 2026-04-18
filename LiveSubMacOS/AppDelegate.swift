@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let uiState = UIState()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // UserDefaults.standard.removePersistentDomain(forName: Bundle.main.bundleIdentifier!)
         setupStatusBar()
         setupIsland()
     }
@@ -46,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
 
         let windowWidth: CGFloat = 460
-        let windowHeight: CGFloat = 350
+        let windowHeight: CGFloat = 400
         let initialRect = NSRect(
             x: screen.visibleFrame.midX - (windowWidth / 2),
             y: screen.visibleFrame.maxY - windowHeight - 8,

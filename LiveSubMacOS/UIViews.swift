@@ -1,4 +1,5 @@
 import SwiftUI
+import Translation
 import Combine
 import CoreGraphics
 import AppKit
@@ -31,6 +32,12 @@ final class UIState: ObservableObject {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n")
+    }
+    
+    func setTranslationSession(_ session: TranslationSession) {
+        Task {
+            await audioManager.setTranslationSession(session)
+        }
     }
 
     init() {
@@ -158,8 +165,10 @@ struct DynamicIslandView: View {
     @State private var isSettingsHovered = false
     @State private var isQuitHovered = false
     @State private var isActivateHovered = false
+    @State private var translationConfig: TranslationSession.Configuration?
     
-    @AppStorage("selectedLanguage") private var selectedLanguage = "en-US"
+    @AppStorage("sourceLanguage") private var sourceLanguage = "en"
+    @AppStorage("targetLanguage") private var targetLanguage = "none"
     @AppStorage("selectedModel") private var selectedModel = "small"
     @AppStorage("licenseKey") private var licenseKey = ""
 
@@ -199,6 +208,30 @@ struct DynamicIslandView: View {
         .padding(.top, 6)
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isSettingsMode)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .translationTask(translationConfig) { session in
+            uiState.setTranslationSession(session)
+            try? await Task.sleep(for: .seconds(1_000_000_000))
+        }
+        // Cập nhật config khi thay đổi 1 trong 2 ngôn ngữ
+        .onChange(of: sourceLanguage) { _, newValue in
+            updateTranslationConfig(source: newValue, target: targetLanguage)
+        }
+        .onChange(of: targetLanguage) { _, newValue in
+            updateTranslationConfig(source: sourceLanguage, target: newValue)
+        }
+        .onAppear {
+            updateTranslationConfig(source: sourceLanguage, target: targetLanguage)
+        }
+    }
+    
+    private func updateTranslationConfig(source: String, target: String) {
+        guard target != "none", source != target else {
+            translationConfig = nil
+            return
+        }
+        let sourceLang = Locale.Language(identifier: source)
+        let targetLang = Locale.Language(identifier: target)
+        translationConfig = TranslationSession.Configuration(source: sourceLang, target: targetLang)
     }
 
     // --- MAIN SUBTITLE VIEW ---
@@ -295,10 +328,26 @@ struct DynamicIslandView: View {
     // --- SETTINGS CONTENT ---
     private var settingsContent: some View {
         VStack(spacing: 12) {
-            settingsRow(label: "Language") {
-                CustomDropdown(text: LanguageOption.available.first(where: { $0.id == selectedLanguage })?.name ?? "Select") {
-                    ForEach(LanguageOption.available) { lang in
-                        Button(lang.name) { selectedLanguage = lang.id }
+            // Hàng 1: Ngôn ngữ nguồn (Spoken)
+            settingsRow(label: "Spoken") {
+                let currentName = LanguageOption.whisperLanguages.first(where: { $0.id == sourceLanguage })?.name ?? "Select"
+                CustomDropdown(text: currentName) {
+                    ForEach(LanguageOption.whisperLanguages) { lang in
+                        Button(lang.name) { sourceLanguage = lang.id }
+                    }
+                }
+            }
+            
+            // Hàng 2: Ngôn ngữ đích (Subtitle)
+            settingsRow(label: "Subtitle") {
+                let currentTargetName = targetLanguage == "none" ? "Do not translate" :
+                    (LanguageOption.whisperLanguages.first(where: { $0.id == targetLanguage })?.name ?? "Select")
+                
+                CustomDropdown(text: currentTargetName) {
+                    Button("Do not translate") { targetLanguage = "none" }
+                    Divider()
+                    ForEach(LanguageOption.whisperLanguages) { lang in
+                        Button(lang.name) { targetLanguage = lang.id }
                     }
                 }
             }

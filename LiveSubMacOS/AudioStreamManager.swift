@@ -3,6 +3,8 @@ import ScreenCaptureKit
 import AVFoundation
 import CoreMedia
 import CoreML
+import Translation
+import NaturalLanguage
 import WhisperKit
 
 // MARK: - Data Model
@@ -26,6 +28,8 @@ actor AudioStreamManager: NSObject {
     private let overlapSize: Int          = 8_000    // 0.5 giây
     private let minProcessInterval: TimeInterval = 0.25
     private let vadWindowSize: Int        = 8_000    // 0.5 giây
+    
+    private var translationSession: TranslationSession?
 
     // MARK: State
     private var whisper: WhisperKit?
@@ -63,6 +67,11 @@ actor AudioStreamManager: NSObject {
     }
 
     // MARK: - Setup & Model Management
+    
+    // Hàm để UIState đẩy session xuống
+    func setTranslationSession(_ session: TranslationSession) {
+        self.translationSession = session
+    }
 
     private let modelLinks: [String: String] = [
         "tiny": "https://huggingface.co/buckets/hvlinhtptn/livesub/resolve/openai_whisper-tiny.zip?download=true",
@@ -261,29 +270,37 @@ actor AudioStreamManager: NSObject {
         guard let whisper else { return }
 
         do {
+            let sourceId = defaults.string(forKey: "sourceLanguage") ?? "en"
+            
             var opts = DecodingOptions()
             opts.temperature = 0
             opts.temperatureFallbackCount = 0
             opts.withoutTimestamps = true
             opts.skipSpecialTokens = true
-            opts.language = preferredLanguageCode()
-            opts.detectLanguage = opts.language == nil
+            opts.language = sourceId // ÉP CỨNG NGÔN NGỮ NÓI
+            opts.detectLanguage = false     // TẮT TỰ ĐỘNG NHẬN DIỆN
 
             let results = try await whisper.transcribe(audioArray: window, decodeOptions: opts)
             guard let result = results.first else { return }
 
             let cleanSegments = result.segments.filter { isCleanSegment($0) }
             let rawText = cleanSegments.map { $0.text }.joined(separator: " ")
-            let newLiveText = normalizeText(rawText)
-
-            let tailSilent = isTailSilent(window)
-
-            await processTranscriptionResult(newLiveText, tailSilent: tailSilent, windowSize: window.count)
+            
+            let cleanRawText = normalizeText(rawText)
+            if cleanRawText.isEmpty { return }
+            await handleTranslationAndUI(cleanRawText, tailSilent: isTailSilent(window))
 
         } catch {
             await sendStatus("Transcription error: \(error.localizedDescription)")
         }
     }
+    
+    // Hàm xử lý chính: Nhận text thô -> Check tiếng -> Dịch -> Đẩy UI
+    private func handleTranslationAndUI(_ text: String, tailSilent: Bool) async {
+        guard !text.isEmpty else { return }
+        await processTranscriptionResult(text, tailSilent: tailSilent, windowSize: 128_000)
+    }
+
 
     // MARK: - Result Processing
 
@@ -341,46 +358,117 @@ actor AudioStreamManager: NSObject {
     }
 
     // MARK: - Format & Snapshot Push
-
+//    private func pushSnapshot() {
+//        // 1. Lấy text gốc (Tiếng Anh) hiện tại
+//        let rawCommitted = committedText
+//        let rawLive = liveText
+//        
+//        // Bọc vào Task để gọi TranslationSession (bất đồng bộ)
+//        Task {
+//            var finalDisplayText = ""
+//            let fullRawText = [rawCommitted, rawLive]
+//                .filter { !$0.isEmpty }
+//                .joined(separator: " ")
+//            
+//            // 2. ĐEM TOÀN BỘ CÂU ĐI DỊCH
+//            let sourceId = defaults.string(forKey: "sourceLanguage") ?? "en-US"
+//            let targetId = defaults.string(forKey: "targetLanguage") ?? "vi-VN"
+//            
+//            if sourceId != targetId, !fullRawText.isEmpty, let session = await self.translationSession {
+//                do {
+//                    // Nhờ đưa cả câu dài, máy sẽ hiểu: "book" trong "book a room" là "đặt" chứ không phải "sách"
+//                    let response = try await session.translations(from: [TranslationSession.Request(sourceText: fullRawText)])
+//                    finalDisplayText = response.first?.targetText ?? fullRawText
+//                } catch {
+//                    print("Translation error: \(error)")
+//                    finalDisplayText = fullRawText // Lỗi thì hiện tạm text gốc
+//                }
+//            } else {
+//                finalDisplayText = fullRawText
+//            }
+//            
+//            // 3. XỬ LÝ CHIA DÒNG TEXT SAU KHI ĐÃ DỊCH XONG
+//            let formatted = finalDisplayText
+//                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+//                .trimmingCharacters(in: .whitespacesAndNewlines)
+//                
+//            let words = formatted.split(separator: " ").map { String($0) }
+//            var lines: [String] = []
+//            var currentLine = ""
+//            let maxLineLength = 50 // Tăng lên 50 vì tiếng Việt sau khi dịch thường dài hơn tiếng Anh
+//            
+//            for word in words {
+//                if currentLine.isEmpty {
+//                    currentLine = word
+//                } else if currentLine.count + 1 + word.count <= maxLineLength {
+//                    currentLine += " " + word
+//                } else {
+//                    lines.append(currentLine)
+//                    currentLine = word
+//                }
+//            }
+//            if !currentLine.isEmpty { lines.append(currentLine) }
+//            
+//            // Luôn chỉ lấy 2 dòng cuối cùng để nhét vừa Dynamic Island
+//            let displayLines = Array(lines.suffix(2))
+//            let snapshot = SubtitleSnapshot(stableLines: displayLines, pendingText: "")
+//            
+//            let comparableString = snapshot.displayText
+//            guard comparableString != lastDeliveredSnapshotText else { return }
+//            lastDeliveredSnapshotText = comparableString
+//            
+//            // 4. ĐẨY LÊN GIAO DIỆN
+//            let cb = onSubtitleSnapshot
+//            await MainActor.run { cb?(snapshot) }
+//        }
+//    }
+//
     private func pushSnapshot() {
-        var rawText = committedText
-        if !liveText.isEmpty {
-            let separator = committedText.isEmpty ? "" : " "
-            rawText += separator + liveText
-        }
+        let rawCommitted = committedText
+        let rawLive = liveText
         
-        let formatted = rawText
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        Task {
+            let fullRawText = [rawCommitted, rawLive]
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
             
-        let words = formatted.split(separator: " ").map { String($0) }
-        var lines: [String] = []
-        var currentLine = ""
-        let maxLineLength = 40
-        
-        for word in words {
-            if currentLine.isEmpty {
-                currentLine = word
-            } else if currentLine.count + 1 + word.count <= maxLineLength {
-                currentLine += " " + word
-            } else {
-                lines.append(currentLine)
-                currentLine = word
+            if fullRawText.isEmpty { return }
+            
+            let sourceId = defaults.string(forKey: "sourceLanguage") ?? "en"
+            let targetId = defaults.string(forKey: "targetLanguage") ?? "none"
+            
+            var translatedText = fullRawText
+            
+            // CHỈ DỊCH KHI USER CHỌN TARGET VÀ TARGET KHÁC SOURCE
+            if targetId != "none", sourceId != targetId, let session = await self.translationSession {
+                do {
+                    // Dịch cả câu dài để lấy ngữ cảnh đúng
+                    let response = try await session.translations(from: [TranslationSession.Request(sourceText: fullRawText)])
+                    translatedText = response.first?.targetText ?? fullRawText
+                } catch {
+                    print("Translation error: \(error)")
+                }
             }
+            
+            // Sau khi có text (đã dịch hoặc gốc), mới format chia dòng
+            let words = translatedText.split(separator: " ").map { String($0) }
+            var lines: [String] = []
+            var currentLine = ""
+            
+            for word in words {
+                if currentLine.isEmpty { currentLine = word }
+                else if currentLine.count + 1 + word.count <= 45 { currentLine += " " + word }
+                else { lines.append(currentLine); currentLine = word }
+            }
+            if !currentLine.isEmpty { lines.append(currentLine) }
+            
+            let displayLines = Array(lines.suffix(2))
+            let snapshot = SubtitleSnapshot(stableLines: displayLines, pendingText: "")
+            
+            // Cập nhật UI
+            let cb = onSubtitleSnapshot
+            await MainActor.run { cb?(snapshot) }
         }
-        if !currentLine.isEmpty {
-            lines.append(currentLine)
-        }
-        
-        let displayLines = Array(lines.suffix(2))
-        let snapshot = SubtitleSnapshot(stableLines: displayLines, pendingText: "")
-        
-        let comparableString = snapshot.displayText
-        guard comparableString != lastDeliveredSnapshotText else { return }
-        lastDeliveredSnapshotText = comparableString
-        
-        let cb = onSubtitleSnapshot
-        Task { @MainActor in cb?(snapshot) }
     }
 
     // MARK: - VAD Helpers
