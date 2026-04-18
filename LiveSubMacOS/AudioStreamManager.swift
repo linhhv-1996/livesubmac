@@ -30,6 +30,8 @@ actor AudioStreamManager: NSObject {
     private let vadWindowSize: Int        = 8_000    // 0.5 giây
     
     private var translationSession: TranslationSession?
+    private var activeTranslationTask: Task<Void, Never>?
+    private var transcriptionTask: Task<Void, Never>?
 
     // MARK: State
     private var whisper: WhisperKit?
@@ -134,8 +136,23 @@ actor AudioStreamManager: NSObject {
                 process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
                 process.arguments = ["-o", tempZipURL.path, "-d", modelsDirectory.path]
                 
-                try process.run()
-                process.waitUntilExit()
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    process.terminationHandler = { finishedProcess in
+                        if finishedProcess.terminationStatus == 0 {
+                            continuation.resume()
+                        } else {
+                            let error = NSError(domain: "UnzipError", code: Int(finishedProcess.terminationStatus), userInfo: [NSLocalizedDescriptionKey: "Failed to unzip model"])
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                    
+                    do {
+                        try process.run()
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
+                
                 print("🛠️ DEBUG [7]: Giải nén xong (Exit code: \(process.terminationStatus))")
                 
                 try? FileManager.default.removeItem(at: tempZipURL)
@@ -213,6 +230,9 @@ actor AudioStreamManager: NSObject {
     }
 
     func stopCapture() {
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
+        
         let s = stream
         stream = nil
         streamBridge = nil
@@ -260,7 +280,7 @@ actor AudioStreamManager: NSObject {
         lastProcessTime = now
         isTranscribing = true
 
-        Task { await transcribe(window: window) }
+        transcriptionTask = Task { await transcribe(window: window) }
     }
 
     // MARK: - Transcription
@@ -281,6 +301,9 @@ actor AudioStreamManager: NSObject {
             opts.detectLanguage = false     // TẮT TỰ ĐỘNG NHẬN DIỆN
 
             let results = try await whisper.transcribe(audioArray: window, decodeOptions: opts)
+            
+            if Task.isCancelled { return }
+            
             guard let result = results.first else { return }
 
             let cleanSegments = result.segments.filter { isCleanSegment($0) }
@@ -358,76 +381,16 @@ actor AudioStreamManager: NSObject {
     }
 
     // MARK: - Format & Snapshot Push
-//    private func pushSnapshot() {
-//        // 1. Lấy text gốc (Tiếng Anh) hiện tại
-//        let rawCommitted = committedText
-//        let rawLive = liveText
-//        
-//        // Bọc vào Task để gọi TranslationSession (bất đồng bộ)
-//        Task {
-//            var finalDisplayText = ""
-//            let fullRawText = [rawCommitted, rawLive]
-//                .filter { !$0.isEmpty }
-//                .joined(separator: " ")
-//            
-//            // 2. ĐEM TOÀN BỘ CÂU ĐI DỊCH
-//            let sourceId = defaults.string(forKey: "sourceLanguage") ?? "en-US"
-//            let targetId = defaults.string(forKey: "targetLanguage") ?? "vi-VN"
-//            
-//            if sourceId != targetId, !fullRawText.isEmpty, let session = await self.translationSession {
-//                do {
-//                    // Nhờ đưa cả câu dài, máy sẽ hiểu: "book" trong "book a room" là "đặt" chứ không phải "sách"
-//                    let response = try await session.translations(from: [TranslationSession.Request(sourceText: fullRawText)])
-//                    finalDisplayText = response.first?.targetText ?? fullRawText
-//                } catch {
-//                    print("Translation error: \(error)")
-//                    finalDisplayText = fullRawText // Lỗi thì hiện tạm text gốc
-//                }
-//            } else {
-//                finalDisplayText = fullRawText
-//            }
-//            
-//            // 3. XỬ LÝ CHIA DÒNG TEXT SAU KHI ĐÃ DỊCH XONG
-//            let formatted = finalDisplayText
-//                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-//                .trimmingCharacters(in: .whitespacesAndNewlines)
-//                
-//            let words = formatted.split(separator: " ").map { String($0) }
-//            var lines: [String] = []
-//            var currentLine = ""
-//            let maxLineLength = 50 // Tăng lên 50 vì tiếng Việt sau khi dịch thường dài hơn tiếng Anh
-//            
-//            for word in words {
-//                if currentLine.isEmpty {
-//                    currentLine = word
-//                } else if currentLine.count + 1 + word.count <= maxLineLength {
-//                    currentLine += " " + word
-//                } else {
-//                    lines.append(currentLine)
-//                    currentLine = word
-//                }
-//            }
-//            if !currentLine.isEmpty { lines.append(currentLine) }
-//            
-//            // Luôn chỉ lấy 2 dòng cuối cùng để nhét vừa Dynamic Island
-//            let displayLines = Array(lines.suffix(2))
-//            let snapshot = SubtitleSnapshot(stableLines: displayLines, pendingText: "")
-//            
-//            let comparableString = snapshot.displayText
-//            guard comparableString != lastDeliveredSnapshotText else { return }
-//            lastDeliveredSnapshotText = comparableString
-//            
-//            // 4. ĐẨY LÊN GIAO DIỆN
-//            let cb = onSubtitleSnapshot
-//            await MainActor.run { cb?(snapshot) }
-//        }
-//    }
-//
+    
     private func pushSnapshot() {
         let rawCommitted = committedText
         let rawLive = liveText
         
-        Task {
+        // 1. Huỷ ngay cái task dịch đang dở dang trước đó (nếu có)
+        activeTranslationTask?.cancel()
+        
+        // 2. Tạo task mới và gán vào biến
+        activeTranslationTask = Task {
             let fullRawText = [rawCommitted, rawLive]
                 .filter { !$0.isEmpty }
                 .joined(separator: " ")
@@ -439,10 +402,8 @@ actor AudioStreamManager: NSObject {
             
             var translatedText = fullRawText
             
-            // CHỈ DỊCH KHI USER CHỌN TARGET VÀ TARGET KHÁC SOURCE
             if targetId != "none", sourceId != targetId, let session = await self.translationSession {
                 do {
-                    // Dịch cả câu dài để lấy ngữ cảnh đúng
                     let response = try await session.translations(from: [TranslationSession.Request(sourceText: fullRawText)])
                     translatedText = response.first?.targetText ?? fullRawText
                 } catch {
@@ -450,7 +411,9 @@ actor AudioStreamManager: NSObject {
                 }
             }
             
-            // Sau khi có text (đã dịch hoặc gốc), mới format chia dòng
+            // 3. CHECK CANCEL: Nếu trong lúc đang dịch mà có câu mới tới -> Dừng việc đẩy lên UI
+            if Task.isCancelled { return }
+            
             let words = translatedText.split(separator: " ").map { String($0) }
             var lines: [String] = []
             var currentLine = ""
@@ -465,7 +428,6 @@ actor AudioStreamManager: NSObject {
             let displayLines = Array(lines.suffix(2))
             let snapshot = SubtitleSnapshot(stableLines: displayLines, pendingText: "")
             
-            // Cập nhật UI
             let cb = onSubtitleSnapshot
             await MainActor.run { cb?(snapshot) }
         }
