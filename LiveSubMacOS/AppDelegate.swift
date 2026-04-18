@@ -42,12 +42,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
-
     private func setupIsland() {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
 
         let windowWidth: CGFloat = 460
-//        let windowHeight: CGFloat = 156
         let windowHeight: CGFloat = 350
         let initialRect = NSRect(
             x: screen.visibleFrame.midX - (windowWidth / 2),
