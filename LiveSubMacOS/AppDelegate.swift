@@ -8,7 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let uiState = UIState()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // UserDefaults.standard.removePersistentDomain(forName: Bundle.main.bundleIdentifier!)
+        UserDefaults.standard.removePersistentDomain(forName: Bundle.main.bundleIdentifier!)
         setupStatusBar()
         setupIsland()
     }

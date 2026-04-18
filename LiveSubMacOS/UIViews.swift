@@ -171,6 +171,7 @@ struct DynamicIslandView: View {
     @AppStorage("targetLanguage") private var targetLanguage = "none"
     @AppStorage("selectedModel") private var selectedModel = "small"
     @AppStorage("licenseKey") private var licenseKey = ""
+    @AppStorage("isFirstLaunch") private var isFirstLaunch = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -179,7 +180,13 @@ struct DynamicIslandView: View {
                 .padding(.vertical, 16)
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    if !isSettingsMode { uiState.toggleRecording() }
+                    if isSettingsMode {
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                            isSettingsMode = false
+                        }
+                    } else {
+                        uiState.toggleRecording()
+                    }
                 }
             
             if isSettingsMode {
@@ -221,6 +228,12 @@ struct DynamicIslandView: View {
         }
         .onAppear {
             updateTranslationConfig(source: sourceLanguage, target: targetLanguage)
+            if isFirstLaunch {
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                    isSettingsMode = true
+                }
+                isFirstLaunch = false
+            }
         }
     }
     
