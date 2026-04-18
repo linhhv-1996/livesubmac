@@ -33,6 +33,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleIsland() {
         guard let panel = islandPanel else { return }
         if panel.isVisible {
+            if uiState.isRecording {
+                uiState.stopRecording()
+            }
             panel.orderOut(nil)
         } else {
             panel.orderFrontRegardless()
@@ -81,4 +84,3 @@ final class DynamicIslandPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 }
-

@@ -123,7 +123,7 @@ final class UIState: ObservableObject {
         }
     }
 
-    private func stopRecording() {
+    func stopRecording() {
         stableLines = []
         pendingText = ""
         Task {
@@ -405,4 +405,3 @@ struct DynamicIslandView: View {
         .onHover { isHovered.wrappedValue = $0 }
     }
 }
-
